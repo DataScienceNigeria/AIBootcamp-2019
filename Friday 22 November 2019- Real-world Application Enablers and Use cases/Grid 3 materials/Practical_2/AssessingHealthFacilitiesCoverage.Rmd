@@ -1,0 +1,179 @@
+---
+title: 'Practical 2: Assessing Health Facilities Coverage'
+author: "GRID3"
+date: "22 November 2019"
+output:
+  grid3rmd::html_grid3:
+    number_sections: false
+    code_folding: show
+  html_document: default
+---
+
+```{r, include=F}
+knitr::opts_chunk$set(
+  message = F,
+  warning = F,
+  out.width = "100%"
+)
+```
+
+This exercise provides an example of how we can use GRID3 data within an application. 
+
+**The problem**: We want to assess health facility coverage for maternal healthcare in Kaduna state. We are interested in finding out which areas are over-stretched with a high number of women of child-bearing age (WOCBA) per health-facility. By identifying a target number of people per health facility, we can begin to highlight locations that may need further invention. 
+
+# Exercise Overview
+
+Using geospatial analysis in R, this demo will show an assessment of health facility coverage for maternal health using the GRID3 population data for Kaduna State.
+
+In this exercise we are going to:
+
+1. Load some spatial data
+2. Subset the data to focus on points of interest
+3. Aggregate dataset using some basic geospatial techniques
+4. Try and identify connections between datasets to set targets
+
+# Loading Packages
+
+```{r setup}
+require(sp)
+require(sf)
+require(raster)
+require(dismo)
+require(spatialEco)
+require(tmap)
+require(dplyr)
+require(DT)
+```
+
+# Step 1: Loading Datasets
+
+We have four datasets used in this example:
+
+> These datasets can be obtained from the GRID3 Nigeria Data portal at https://grid3.gov.ng/
+
+1. **Health facility locations**: 
+2. **Ward boundaries**
+3. **Gridded population (women age 15-49) data for Kaduna State**
+4. **State boundary**
+
+```{r data, results = 'hide'}
+health_facilities <- read.csv("data/kaduna_health_sub.csv", fileEncoding="latin1")
+population <- raster("data/nga_pop_wocba.tif")
+ward_boundaries <- st_read("data/kaduna_wards.shp")
+state_boundaries <- st_read("data/kaduna_state.shp")
+```
+
+We will view our health facilty data below. In total there are `r nrow(data)` health centres recorded within the dataset. This includes data such as their location, whether the type of health centre *(primary, secondary, tertiary)*, and whether it is private or publicly owned. An example of some of the data is shown below:
+
+```{r view}
+datatable(head(health_facilities[8:18]),
+          options = list(scrollX = TRUE)) # printing first rows of dataset
+```
+
+# Step 2: Filtering Public Health Facilities
+For our example, we are only interested in **public** health centers. We will therefore filter the dataset below:
+
+```{r subset}
+public_hf <- health_facilities %>% filter(ownership == "Public")
+```
+
+# Step 3: Create Point Data
+In order to conduct spatial analysis on the data, we must convert these into a spatial object: 
+
+```{r sp}
+public_hf_pt <- st_as_sf(public_hf, coords = c("longitude", "latitude"))
+```
+
+We will quickly visualise this data below:
+
+```{r locations, message=FALSE}
+tmap_mode("view") # to make map interactive
+
+tm_shape(public_hf_pt) +
+  tm_dots(id = "name", col = "orange") +
+  tm_shape(state_boundaries) +
+  tm_borders(lwd = 3, col = "black") +
+  tm_basemap("Esri.WorldImagery")
+```
+
+Visualise the gridded population data:
+
+```{r grid vis,message=FALSE}
+tm_shape(state_boundaries) +
+  tm_borders(col = "black") +
+  tm_shape(population) +
+  tm_raster(title = "Population")
+```
+
+# Step 4: Computing Voronoi Polygons
+
+We are interested in finding out the health facility coverage across space. 
+
+- Idea: optimize the  partitioning of the area into polygons such that each polygon contains one health facility.
+- Method: [Voronoi Polygon](https://en.wikipedia.org/wiki/Voronoi_diagram)
+
+```{r voronois}
+voronoi <- dismo::voronoi(st_coordinates(public_hf_pt)) # compute voronoi from points coordinates
+voronoi <- st_as_sf(voronoi) # convert into a "sf" object
+voronoi <- cbind(voronoi, public_hf_pt)
+st_crs(voronoi) <- st_crs(state_boundaries) # setting geographical coordinate system
+voronoi <- voronoi %>% st_intersection(state_boundaries) # constrain polygon to state boundaries
+```
+
+Again, we will visualise these below:
+
+```{r, plot voronois}
+tm_shape(voronoi) +
+  tm_borders() +
+  tm_shape(state_boundaries) +
+  tm_borders(lwd = 3) +
+  tm_shape(public_hf_pt) +
+  tm_dots(col = "orange")
+```
+
+# Step 5: Identifying Population Coverage Target with Zonal Statistics
+
+Idea: find outliers in population per health facility to set a target.
+
+## Using Zonal statistics
+
+*Zonal statistic*: summmary statistics of raster values at polygon level.
+
+> The Zonal statistic function requires more time than we have! Let's load the precalculation.
+
+```{r zonal}
+# z.stat <- zonal.stats(v, r, stat = sum, trace = FALSE, plot = FALSE)
+pop_per_voronoi <- readRDS("data/pop_per_voronoi")
+datatable(head(pop_per_voronoi))
+```
+
+## Setting a target
+
+```{r, pop distribution}
+hist(pop_per_voronoi$population,
+  breaks = 50,
+  main = "",
+  xlab = "Population",
+  col = "grey"
+)
+abline(v = 4000, col = "red")
+```
+
+# Step 6: Identifying areas above target
+
+We are subsetting the data to only include those voronois above the 'target' that can be seen in orange. These would be recommended for further intervention, such as the expansion of existing health facilities or placement of new facilities.
+
+```{r target,message=FALSE,warning=FALSE}
+voronoi <- voronoi %>% left_join(pop_per_voronoi, by = c("name" = "health_facility"))
+
+above_target <- voronoi %>% filter(population > 4000)
+
+tmap_mode("plot")
+tm_shape(voronoi) +
+  tm_borders() +
+  tm_fill(col = "white") +
+  tm_shape(above_target) +
+  tm_borders() +
+  tm_fill(col = "orange")
+```
+
